@@ -10,22 +10,21 @@ import org.apache.commons.lang3.StringUtils;
 import org.sunbird.actor.core.BaseActor;
 import org.sunbird.actor.router.ActorConfig;
 import org.sunbird.cassandra.CassandraOperation;
-import org.sunbird.common.ElasticSearchHelper;
+import org.sunbird.common.ElasticSearchUtil;
 import org.sunbird.common.exception.ProjectCommonException;
-import org.sunbird.common.factory.EsClientFactory;
-import org.sunbird.common.inf.ElasticSearchService;
 import org.sunbird.common.models.response.Response;
-import org.sunbird.common.models.util.*;
+import org.sunbird.common.models.util.ActorOperations;
+import org.sunbird.common.models.util.JsonKey;
+import org.sunbird.common.models.util.ProjectLogger;
+import org.sunbird.common.models.util.ProjectUtil;
 import org.sunbird.common.models.util.ProjectUtil.EsType;
 import org.sunbird.common.request.ExecutionContext;
 import org.sunbird.common.request.Request;
 import org.sunbird.common.responsecode.ResponseCode;
 import org.sunbird.dto.SearchDTO;
 import org.sunbird.helper.ServiceFactory;
-import org.sunbird.learner.util.SearchTelemetryUtil;
 import org.sunbird.learner.util.Util;
 import org.sunbird.telemetry.util.TelemetryUtil;
-import scala.concurrent.Future;
 
 /** This class provides API's to create, update, get and delete user note */
 @ActorConfig(
@@ -36,12 +35,11 @@ public class NotesManagementActor extends BaseActor {
 
   private Util.DbInfo userNotesDbInfo = Util.dbInfoMap.get(JsonKey.USER_NOTES_DB);
   private CassandraOperation cassandraOperation = ServiceFactory.getInstance();
-  private ElasticSearchService esService = EsClientFactory.getInstance(JsonKey.REST);
 
   /** Receives the actor message and perform the operation for user note */
   @Override
   public void onReceive(Request request) throws Throwable {
-    Util.initializeContext(request, TelemetryEnvKey.USER);
+    Util.initializeContext(request, JsonKey.USER);
     // set request id fto thread loacl...
     ExecutionContext.setRequestId(request.getRequestId());
     switch (request.getOperation()) {
@@ -112,9 +110,9 @@ public class NotesManagementActor extends BaseActor {
       TelemetryUtil.generateCorrelatedObject(uniqueId, JsonKey.NOTE, null, correlatedObject);
       TelemetryUtil.generateCorrelatedObject(updatedBy, JsonKey.USER, null, correlatedObject);
 
-      Map<String, String> rollup =
-          prepareRollUpForObjectType(
-              (String) req.get(JsonKey.CONTENT_ID), (String) req.get(JsonKey.COURSE_ID));
+      Map<String, String> rollup = new HashMap<>();
+      rollup.put("l1", (String) req.get(JsonKey.COURSE_ID));
+      rollup.put("l2", (String) req.get(JsonKey.CONTENT_ID));
       TelemetryUtil.addTargetObjectRollUp(rollup, targetObject);
 
       TelemetryUtil.telemetryProcessingCall(
@@ -184,7 +182,10 @@ public class NotesManagementActor extends BaseActor {
       targetObject = TelemetryUtil.generateTargetObject(noteId, JsonKey.NOTE, JsonKey.UPDATE, null);
       TelemetryUtil.generateCorrelatedObject(noteId, JsonKey.NOTE, null, correlatedObject);
       TelemetryUtil.generateCorrelatedObject(userId, JsonKey.USER, null, correlatedObject);
+
       Map<String, String> rollup = new HashMap<>();
+      rollup.put("l1", (String) (actorMessage.getRequest()).get(JsonKey.COURSE_ID));
+      rollup.put("l2", (String) (actorMessage.getRequest()).get(JsonKey.CONTENT_ID));
       TelemetryUtil.addTargetObjectRollUp(rollup, targetObject);
 
       TelemetryUtil.telemetryProcessingCall(
@@ -289,23 +290,18 @@ public class NotesManagementActor extends BaseActor {
     }
     excludedFields.add(JsonKey.IS_DELETED);
     searchDto.setExcludedFields(excludedFields);
-    Future<Map<String, Object>> resultF =
-        esService.search(searchDto, EsType.usernotes.getTypeName());
     Map<String, Object> result =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(resultF);
+        ElasticSearchUtil.complexSearch(
+            searchDto, ProjectUtil.EsIndex.sunbird.getIndexName(), EsType.usernotes.getTypeName());
     if (result != null) {
       Object count = result.get(JsonKey.COUNT);
       Object note = result.get(JsonKey.CONTENT);
       result = new LinkedHashMap<>();
       result.put(JsonKey.COUNT, count);
       result.put(JsonKey.NOTE, note);
-      result.put(JsonKey.CONTENT, note);
     } else {
       result = new HashMap<>();
     }
-    String[] types = {EsType.usernotes.getTypeName()};
-    SearchTelemetryUtil.generateSearchTelemetryEvent(
-        searchDto, types, result); // generating search for telemetry
     return result;
   }
 
@@ -376,10 +372,9 @@ public class NotesManagementActor extends BaseActor {
     Boolean result = false;
 
     if (!StringUtils.isBlank(userId)) {
-      Future<Map<String, Object>> dataF =
-          esService.getDataByIdentifier(EsType.user.getTypeName(), userId);
       Map<String, Object> data =
-          (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(dataF);
+          ElasticSearchUtil.getDataByIdentifier(
+              ProjectUtil.EsIndex.sunbird.getIndexName(), EsType.user.getTypeName(), userId);
       if (null != data && !data.isEmpty()) {
         result = true;
       }
@@ -409,11 +404,8 @@ public class NotesManagementActor extends BaseActor {
    * @return Note data as List<Map<String, Object>>
    */
   private Map<String, Object> getNoteRecordById(String noteId) {
-    Future<Map<String, Object>> resultF =
-        esService.getDataByIdentifier(EsType.usernotes.getTypeName(), noteId);
-    Map<String, Object> result =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(resultF);
-    return result;
+    return ElasticSearchUtil.getDataByIdentifier(
+        ProjectUtil.EsIndex.sunbird.getIndexName(), EsType.usernotes.getTypeName(), noteId);
   }
 
   private Boolean validateUserForNoteUpdation(String userId, String noteId) {
@@ -430,23 +422,5 @@ public class NotesManagementActor extends BaseActor {
           ResponseCode.FORBIDDEN.getResponseCode());
     }
     return result;
-  }
-
-  /** This method will handle rollup values (for contentId and courseId) in object */
-  public static Map<String, String> prepareRollUpForObjectType(String contentId, String courseId) {
-
-    Map<String, String> rollupMap = new HashMap<>();
-
-    if (StringUtils.isBlank(courseId)) { // if courseId is blank the level 1 should be contentId
-      if (StringUtils.isNotBlank(contentId)) {
-        rollupMap.put("l1", contentId);
-      }
-    } else {
-      rollupMap.put("l1", courseId); // if courseId is not blank level 1 should be courseId
-      if (StringUtils.isNotBlank(contentId)) {
-        rollupMap.put("l2", contentId);
-      }
-    }
-    return rollupMap;
   }
 }

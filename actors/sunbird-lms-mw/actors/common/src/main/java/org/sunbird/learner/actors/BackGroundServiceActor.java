@@ -9,9 +9,7 @@ import org.sunbird.actor.background.BackgroundOperations;
 import org.sunbird.actor.core.BaseActor;
 import org.sunbird.actor.router.ActorConfig;
 import org.sunbird.cassandra.CassandraOperation;
-import org.sunbird.common.ElasticSearchHelper;
-import org.sunbird.common.factory.EsClientFactory;
-import org.sunbird.common.inf.ElasticSearchService;
+import org.sunbird.common.ElasticSearchUtil;
 import org.sunbird.common.models.response.Response;
 import org.sunbird.common.models.util.JsonKey;
 import org.sunbird.common.models.util.ProjectLogger;
@@ -20,7 +18,6 @@ import org.sunbird.common.request.Request;
 import org.sunbird.dto.SearchDTO;
 import org.sunbird.helper.ServiceFactory;
 import org.sunbird.learner.util.Util;
-import scala.concurrent.Future;
 
 @ActorConfig(
   tasks = {},
@@ -29,7 +26,6 @@ import scala.concurrent.Future;
 public class BackGroundServiceActor extends BaseActor {
 
   private CassandraOperation cassandraOperation = ServiceFactory.getInstance();
-  private static ElasticSearchService esService = EsClientFactory.getInstance(JsonKey.REST);
 
   @Override
   public void onReceive(Request request) throws Throwable {
@@ -114,10 +110,11 @@ public class BackGroundServiceActor extends BaseActor {
     Map<String, Object> filter = new HashMap<>();
     filter.put(JsonKey.LOCATION_ID, locationId);
     searchDto.getAdditionalProperties().put(JsonKey.FILTERS, filter);
-    Future<Map<String, Object>> esResponseF =
-        esService.search(searchDto, ProjectUtil.EsType.organisation.getTypeName());
     Map<String, Object> esResponse =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(esResponseF);
+        ElasticSearchUtil.complexSearch(
+            searchDto,
+            ProjectUtil.EsIndex.sunbird.getIndexName(),
+            ProjectUtil.EsType.organisation.getTypeName());
     List<Map<String, Object>> orgList = (List<Map<String, Object>>) esResponse.get(JsonKey.CONTENT);
 
     List<String> orgIdList = new ArrayList<>();
@@ -136,10 +133,11 @@ public class BackGroundServiceActor extends BaseActor {
       filter2.put(JsonKey.ORGANISATIONS + "." + JsonKey.ORGANISATION_ID, orgIdList);
       ProjectLogger.log("filter2.get(JsonKey.ORGANISATIONS.JsonKey.ORGANISATION_ID) " + orgIdList);
       searchDto.getAdditionalProperties().put(JsonKey.FILTERS, filter2);
-      Future<Map<String, Object>> esResponse2F =
-          esService.search(searchDto, ProjectUtil.EsType.user.getTypeName());
       Map<String, Object> esResponse2 =
-          (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(esResponse2F);
+          ElasticSearchUtil.complexSearch(
+              searchDto,
+              ProjectUtil.EsIndex.sunbird.getIndexName(),
+              ProjectUtil.EsType.user.getTypeName());
       long userCount = (long) esResponse2.get(JsonKey.COUNT);
       ProjectLogger.log("Total No of User for Location Id " + locationId + " , " + userCount);
       return (int) userCount;

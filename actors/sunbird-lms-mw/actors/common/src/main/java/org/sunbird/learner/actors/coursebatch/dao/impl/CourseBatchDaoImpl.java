@@ -1,7 +1,6 @@
 package org.sunbird.learner.actors.coursebatch.dao.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.sunbird.cassandra.CassandraOperation;
@@ -28,35 +27,24 @@ public class CourseBatchDaoImpl implements CourseBatchDao {
   }
 
   @Override
-  public Response update(String courseId, String batchId, Map<String, Object> map) {
-    Map<String, Object> primaryKey = new HashMap<>();
-    primaryKey.put(JsonKey.COURSE_ID, courseId);
-    primaryKey.put(JsonKey.BATCH_ID, batchId);
-    Map<String, Object> attributeMap = new HashMap<>();
-    attributeMap.putAll(map);
-    attributeMap.remove(JsonKey.COURSE_ID);
-    attributeMap.remove(JsonKey.BATCH_ID);
+  public Response update(Map<String, Object> map) {
     return cassandraOperation.updateRecord(
-        courseBatchDb.getKeySpace(), courseBatchDb.getTableName(), attributeMap, primaryKey);
+        courseBatchDb.getKeySpace(), courseBatchDb.getTableName(), map);
   }
 
   @Override
-  public CourseBatch readById(String courseId, String batchId) {
-    Map<String, Object> primaryKey = new HashMap<>();
-    primaryKey.put(JsonKey.COURSE_ID, courseId);
-    primaryKey.put(JsonKey.BATCH_ID, batchId);
+  public CourseBatch readById(String id) {
     Response courseBatchResult =
         cassandraOperation.getRecordById(
-            courseBatchDb.getKeySpace(), courseBatchDb.getTableName(), primaryKey);
+            courseBatchDb.getKeySpace(), courseBatchDb.getTableName(), id);
     List<Map<String, Object>> courseList =
         (List<Map<String, Object>>) courseBatchResult.get(JsonKey.RESPONSE);
-    if (courseList.isEmpty()) {
+    if ((courseList.isEmpty())) {
       throw new ProjectCommonException(
           ResponseCode.invalidCourseBatchId.getErrorCode(),
           ResponseCode.invalidCourseBatchId.getErrorMessage(),
           ResponseCode.CLIENT_ERROR.getResponseCode());
     } else {
-      courseList.get(0).remove(JsonKey.PARTICIPANT);
       return mapper.convertValue(courseList.get(0), CourseBatch.class);
     }
   }

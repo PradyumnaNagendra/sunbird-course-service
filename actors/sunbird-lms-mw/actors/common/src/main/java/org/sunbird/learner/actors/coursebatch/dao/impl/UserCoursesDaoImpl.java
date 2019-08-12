@@ -1,8 +1,8 @@
 package org.sunbird.learner.actors.coursebatch.dao.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.List;
+import java.util.Map;
 import org.apache.commons.collections.CollectionUtils;
 import org.sunbird.cassandra.CassandraOperation;
 import org.sunbird.common.models.response.Response;
@@ -31,11 +31,8 @@ public class UserCoursesDaoImpl implements UserCoursesDao {
   }
 
   @Override
-  public UserCourses read(String batchId, String userId) {
-    Map<String, Object> primaryKey = new HashMap<>();
-    primaryKey.put(JsonKey.BATCH_ID, batchId);
-    primaryKey.put(JsonKey.USER_ID, userId);
-    Response response = cassandraOperation.getRecordById(KEYSPACE_NAME, TABLE_NAME, primaryKey);
+  public UserCourses read(String id) {
+    Response response = cassandraOperation.getRecordById(KEYSPACE_NAME, TABLE_NAME, id);
     List<Map<String, Object>> userCoursesList =
         (List<Map<String, Object>>) response.get(JsonKey.RESPONSE);
     if (CollectionUtils.isEmpty(userCoursesList)) {
@@ -50,47 +47,12 @@ public class UserCoursesDaoImpl implements UserCoursesDao {
   }
 
   @Override
-  public Response update(String batchId, String userId, Map<String, Object> updateAttributes) {
-    Map<String, Object> primaryKey = new HashMap<>();
-    primaryKey.put(JsonKey.BATCH_ID, batchId);
-    primaryKey.put(JsonKey.USER_ID, userId);
-    Map<String, Object> updateList = new HashMap<>();
-    updateList.putAll(updateAttributes);
-    updateList.remove(JsonKey.BATCH_ID);
-    updateList.remove(JsonKey.USER_ID);
-    return cassandraOperation.updateRecord(KEYSPACE_NAME, TABLE_NAME, updateList, primaryKey);
-  }
-
-  @Override
-  public List<String> getAllActiveUserOfBatch(String batchId) {
-    return getBatchParticipants(batchId, true);
-  }
-
-  @Override
-  public Response batchInsert(List<Map<String, Object>> userCoursesDetails) {
-    return cassandraOperation.batchInsert(KEYSPACE_NAME, TABLE_NAME, userCoursesDetails);
+  public Response update(Map<String, Object> updateAttributes) {
+    return cassandraOperation.updateRecord(KEYSPACE_NAME, TABLE_NAME, updateAttributes);
   }
 
   @Override
   public Response insert(Map<String, Object> userCoursesDetails) {
     return cassandraOperation.insertRecord(KEYSPACE_NAME, TABLE_NAME, userCoursesDetails);
-  }
-
-
-  @Override
-  public List<String> getBatchParticipants(String batchId, boolean active) {
-    Map<String, Object> queryMap = new HashMap<>();
-    queryMap.put(JsonKey.BATCH_ID, batchId);
-    Response response = cassandraOperation.getRecords(KEYSPACE_NAME, TABLE_NAME, queryMap, Arrays.asList(JsonKey.USER_ID, JsonKey.ACTIVE));
-    List<Map<String, Object>> userCoursesList =
-            (List<Map<String, Object>>) response.get(JsonKey.RESPONSE);
-    if (CollectionUtils.isEmpty(userCoursesList)) {
-      return null;
-    }
-    return userCoursesList
-            .stream()
-            .filter(userCourse -> (active == (boolean) userCourse.get(JsonKey.ACTIVE)))
-            .map(userCourse -> (String) userCourse.get(JsonKey.USER_ID))
-            .collect(Collectors.toList());
   }
 }

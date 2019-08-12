@@ -9,18 +9,20 @@ import org.apache.commons.lang3.StringUtils;
 import org.sunbird.actor.core.BaseActor;
 import org.sunbird.actor.router.ActorConfig;
 import org.sunbird.cassandra.CassandraOperation;
-import org.sunbird.common.ElasticSearchHelper;
-import org.sunbird.common.ElasticSearchTcpImpl;
+import org.sunbird.common.ElasticSearchUtil;
 import org.sunbird.common.exception.ProjectCommonException;
-import org.sunbird.common.inf.ElasticSearchService;
 import org.sunbird.common.models.response.Response;
-import org.sunbird.common.models.util.*;
+import org.sunbird.common.models.util.ActorOperations;
+import org.sunbird.common.models.util.HttpUtil;
+import org.sunbird.common.models.util.JsonKey;
+import org.sunbird.common.models.util.ProjectLogger;
+import org.sunbird.common.models.util.ProjectUtil;
+import org.sunbird.common.models.util.PropertiesCache;
 import org.sunbird.common.request.ExecutionContext;
 import org.sunbird.common.request.Request;
 import org.sunbird.common.responsecode.ResponseCode;
 import org.sunbird.helper.ServiceFactory;
 import org.sunbird.learner.util.Util;
-import scala.concurrent.Future;
 
 /** @author Manzarul */
 @ActorConfig(
@@ -31,7 +33,6 @@ public class HealthActor extends BaseActor {
 
   private CassandraOperation cassandraOperation = ServiceFactory.getInstance();
   private Util.DbInfo badgesDbInfo = Util.dbInfoMap.get(JsonKey.BADGES_DB);
-  private ElasticSearchService esUtil = new ElasticSearchTcpImpl();
 
   @Override
   public void onReceive(Request message) throws Throwable {
@@ -39,7 +40,7 @@ public class HealthActor extends BaseActor {
       try {
         ProjectLogger.log("AssessmentItemActor onReceive called");
         Request actorMessage = message;
-        Util.initializeContext(actorMessage, TelemetryEnvKey.USER);
+        Util.initializeContext(actorMessage, JsonKey.USER);
         // set request id fto thread loacl...
         ExecutionContext.setRequestId(actorMessage.getRequestId());
         if (actorMessage.getOperation().equalsIgnoreCase(ActorOperations.HEALTH_CHECK.getValue())) {
@@ -85,9 +86,7 @@ public class HealthActor extends BaseActor {
     List<Map<String, Object>> responseList = new ArrayList<>();
     responseList.add(ProjectUtil.createCheckResponse(JsonKey.ACTOR_SERVICE, false, null));
     try {
-      Future<Boolean> esResponseF = esUtil.healthCheck();
-      boolean esResponse = (boolean) ElasticSearchHelper.getResponseFromFuture(esResponseF);
-
+      boolean esResponse = ElasticSearchUtil.healthCheck();
       responseList.add(ProjectUtil.createCheckResponse(JsonKey.ES_SERVICE, esResponse, null));
       isallHealthy = esResponse;
     } catch (Exception e) {
@@ -163,8 +162,7 @@ public class HealthActor extends BaseActor {
     }
     // check the elastic search
     try {
-      Future<Boolean> responseF = esUtil.healthCheck();
-      boolean response = (boolean) ElasticSearchHelper.getResponseFromFuture(responseF);
+      boolean response = ElasticSearchUtil.healthCheck();
       responseList.add(ProjectUtil.createCheckResponse(JsonKey.ES_SERVICE, !response, null));
       isallHealthy = response;
     } catch (Exception e) {

@@ -4,24 +4,23 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.collections4.MapUtils;
 import org.sunbird.actor.core.BaseActor;
 import org.sunbird.actor.router.ActorConfig;
 import org.sunbird.badge.BadgeOperations;
 import org.sunbird.cassandra.CassandraOperation;
-import org.sunbird.common.ElasticSearchHelper;
-import org.sunbird.common.factory.EsClientFactory;
-import org.sunbird.common.inf.ElasticSearchService;
+import org.sunbird.common.ElasticSearchUtil;
 import org.sunbird.common.models.response.Response;
-import org.sunbird.common.models.util.*;
+import org.sunbird.common.models.util.BadgingJsonKey;
+import org.sunbird.common.models.util.JsonKey;
+import org.sunbird.common.models.util.LoggerEnum;
+import org.sunbird.common.models.util.ProjectLogger;
+import org.sunbird.common.models.util.ProjectUtil;
 import org.sunbird.common.request.ExecutionContext;
 import org.sunbird.common.request.Request;
 import org.sunbird.helper.ServiceFactory;
 import org.sunbird.learner.util.Util;
 import org.sunbird.learner.util.Util.DbInfo;
 import org.sunbird.telemetry.util.TelemetryUtil;
-import scala.concurrent.Future;
 
 @ActorConfig(
   tasks = {},
@@ -31,11 +30,10 @@ public class UserBadgeAssertion extends BaseActor {
 
   private CassandraOperation cassandraOperation = ServiceFactory.getInstance();
   private DbInfo dbInfo = Util.dbInfoMap.get(BadgingJsonKey.USER_BADGE_ASSERTION_DB);
-  private ElasticSearchService esUtil = EsClientFactory.getInstance(JsonKey.REST);
 
   @Override
   public void onReceive(Request request) throws Throwable {
-    Util.initializeContext(request, TelemetryEnvKey.USER);
+    Util.initializeContext(request, JsonKey.USER);
     ExecutionContext.setRequestId(request.getRequestId());
     String operation = request.getOperation();
     if (BadgeOperations.assignBadgeToUser.name().equalsIgnoreCase(operation)) {
@@ -66,21 +64,13 @@ public class UserBadgeAssertion extends BaseActor {
 
   @SuppressWarnings("unchecked")
   private void updateUserBadgeDataToES(Map<String, Object> map) {
-    Future<Map<String, Object>> resultF =
-        esUtil.getDataByIdentifier(
-            ProjectUtil.EsType.user.getTypeName(), (String) map.get(JsonKey.USER_ID));
     Map<String, Object> result =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(resultF);
-    if (MapUtils.isEmpty(result)) {
-      ProjectLogger.log(
-          "UserBadgeAssertion:updateUserBadgeDataToES user with userId "
-              + (String) map.get(JsonKey.USER_ID)
-              + " not found",
-          LoggerEnum.INFO.name());
-      return;
-    }
-    if (CollectionUtils.isNotEmpty(
-        (List<Map<String, Object>>) result.get(BadgingJsonKey.BADGE_ASSERTIONS))) {
+        ElasticSearchUtil.getDataByIdentifier(
+            ProjectUtil.EsIndex.sunbird.getIndexName(),
+            ProjectUtil.EsType.user.getTypeName(),
+            (String) map.get(JsonKey.USER_ID));
+    if (result.containsKey(BadgingJsonKey.BADGE_ASSERTIONS)
+        && null != result.get(BadgingJsonKey.BADGE_ASSERTIONS)) {
       List<Map<String, Object>> badgeAssertionsList =
           (List<Map<String, Object>>) result.get(BadgingJsonKey.BADGE_ASSERTIONS);
 
@@ -112,8 +102,7 @@ public class UserBadgeAssertion extends BaseActor {
   private boolean updateDataToElastic(
       String indexName, String typeName, String identifier, Map<String, Object> data) {
 
-    Future<Boolean> responseF = esUtil.update(typeName, identifier, data);
-    boolean response = (boolean) ElasticSearchHelper.getResponseFromFuture(responseF);
+    boolean response = ElasticSearchUtil.updateData(indexName, typeName, identifier, data);
     if (!response) {
       ProjectLogger.log(
           "unbale to save the data inside ES for user badge " + identifier, LoggerEnum.INFO.name());

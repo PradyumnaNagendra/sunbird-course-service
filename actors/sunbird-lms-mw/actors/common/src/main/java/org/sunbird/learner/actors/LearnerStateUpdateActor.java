@@ -1,34 +1,34 @@
 package org.sunbird.learner.actors;
 
+import static org.sunbird.common.models.util.ProjectUtil.isNotNull;
+
+import java.math.BigInteger;
+import java.sql.Timestamp;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.util.*;
-import java.util.stream.Collectors;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.MapUtils;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.commons.lang3.StringUtils;
 import org.sunbird.actor.core.BaseActor;
 import org.sunbird.actor.router.ActorConfig;
 import org.sunbird.cassandra.CassandraOperation;
-import org.sunbird.common.ElasticSearchHelper;
 import org.sunbird.common.exception.ProjectCommonException;
-import org.sunbird.common.factory.EsClientFactory;
-import org.sunbird.common.inf.ElasticSearchService;
 import org.sunbird.common.models.response.Response;
 import org.sunbird.common.models.util.ActorOperations;
 import org.sunbird.common.models.util.JsonKey;
 import org.sunbird.common.models.util.ProjectLogger;
 import org.sunbird.common.models.util.ProjectUtil;
-import org.sunbird.common.models.util.TelemetryEnvKey;
 import org.sunbird.common.models.util.datasecurity.OneWayHashing;
 import org.sunbird.common.request.ExecutionContext;
 import org.sunbird.common.request.Request;
 import org.sunbird.common.responsecode.ResponseCode;
-import org.sunbird.dto.SearchDTO;
 import org.sunbird.helper.ServiceFactory;
-import org.sunbird.kafka.client.InstructionEventGenerator;
 import org.sunbird.learner.util.Util;
-import scala.concurrent.Future;
+import org.sunbird.telemetry.util.TelemetryUtil;
 
 /**
  * This actor to handle learner's state update operation .
@@ -42,254 +42,268 @@ import scala.concurrent.Future;
 )
 public class LearnerStateUpdateActor extends BaseActor {
 
-  private final String actorId = "Course Batch Updater";
-  private final String actorType = "System";
+  private static final String CONTENT_STATE_INFO = "contentStateInfo";
+
   private CassandraOperation cassandraOperation = ServiceFactory.getInstance();
 
-  private Util.DbInfo consumptionDBInfo = Util.dbInfoMap.get(JsonKey.LEARNER_CONTENT_DB);
-  private Util.DbInfo userCourseDBInfo = Util.dbInfoMap.get(JsonKey.LEARNER_COURSE_DB);
-  private ElasticSearchService esService = EsClientFactory.getInstance(JsonKey.REST);
-  private SimpleDateFormat simpleDateFormat = ProjectUtil.getDateFormatter();
-
-  private enum ContentUpdateResponseKeys {
-    SUCCESS_CONTENTS,
-    NOT_A_ON_GOING_BATCH,
-    BATCH_NOT_EXISTS
-  }
-
   /**
-   * Receives the actor message and perform the add content operation.
+   * Receives the actor message and perform the add content operation .
    *
    * @param request Request
    */
+  @SuppressWarnings("unchecked")
   @Override
   public void onReceive(Request request) throws Throwable {
-    Util.initializeContext(request, TelemetryEnvKey.USER);
+    Util.initializeContext(request, JsonKey.USER);
+    // set request id fto thread loacl...
     ExecutionContext.setRequestId(request.getRequestId());
 
+    Response response = new Response();
     if (request.getOperation().equalsIgnoreCase(ActorOperations.ADD_CONTENT.getValue())) {
-      String userId = (String) request.getRequest().get(JsonKey.USER_ID);
-      List<Map<String, Object>> contentList =
-          (List<Map<String, Object>>) request.getRequest().get(JsonKey.CONTENTS);
-      if (CollectionUtils.isNotEmpty(contentList)) {
-        Map<String, List<Map<String, Object>>> batchContentList =
-            contentList
-                .stream()
-                .filter(x -> StringUtils.isNotBlank((String) x.get("batchId")))
-                .collect(
-                    Collectors.groupingBy(
-                        x -> {
-                          return (String) x.get("batchId");
-                        }));
-        List<String> batchIds = batchContentList.keySet().stream().collect(Collectors.toList());
-        Map<String, List<Map<String, Object>>> batches =
-            getBatches(batchIds)
-                .stream()
-                .collect(
-                    Collectors.groupingBy(
-                        x -> {
-                          return (String) x.get("batchId");
-                        }));
-        Map<String, List<Object>> respMessages = new HashMap<>();
-        for (Map.Entry<String, List<Map<String, Object>>> input : batchContentList.entrySet()) {
-          String batchId = input.getKey();
-          if (batches.containsKey(batchId)) {
-            Map<String, Object> batchDetails = batches.get(batchId).get(0);
-            String courseId = (String) batchDetails.get("courseId");
-            int status = getInteger(batchDetails.get("status"), 0);
-            if (status == 1) {
-              List<String> contentIds =
-                  input
-                      .getValue()
-                      .stream()
-                      .map(c -> (String) c.get("contentId"))
-                      .collect(Collectors.toList());
-              Map<String, Map<String, Object>> existingContents =
-                  getContents(userId, contentIds, batchId)
-                      .stream()
-                      .collect(
-                          Collectors.groupingBy(
-                              x -> {
-                                return (String) x.get("contentId");
-                              }))
-                      .entrySet()
-                      .stream()
-                      .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue().get(0)));
-              List<Map<String, Object>> contents =
-                  input
-                      .getValue()
-                      .stream()
-                      .map(
-                          inputContent -> {
-                            Map<String, Object> existingContent =
-                                existingContents.get(inputContent.get("contentId"));
-                            return processContent(inputContent, existingContent, userId);
-                          })
-                      .collect(Collectors.toList());
+      Util.DbInfo dbInfo = Util.dbInfoMap.get(JsonKey.LEARNER_CONTENT_DB);
+      Util.DbInfo batchdbInfo = Util.dbInfoMap.get(JsonKey.COURSE_BATCH_DB);
+      // objects of telemetry event...
+      Map<String, Object> targetObject = null;
+      List<Map<String, Object>> correlatedObject = null;
 
-              cassandraOperation.batchInsert(
-                  consumptionDBInfo.getKeySpace(), consumptionDBInfo.getTableName(), contents);
-              Map<String, Object> updatedBatch = getBatchCurrentStatus(batchId, userId, contents);
-              cassandraOperation.upsertRecord(
-                  userCourseDBInfo.getKeySpace(), userCourseDBInfo.getTableName(), updatedBatch);
-              // Generate Instruction event. Send userId, batchId, courseId, contents.
-              pushInstructionEvent(userId, batchId, courseId, contents);
-              updateMessages(
-                  respMessages, ContentUpdateResponseKeys.SUCCESS_CONTENTS.name(), contentIds);
+      String userId = (String) request.getRequest().get(JsonKey.USER_ID);
+      List<Map<String, Object>> requestedcontentList =
+          (List<Map<String, Object>>) request.getRequest().get(JsonKey.CONTENTS);
+      CopyOnWriteArrayList<Map<String, Object>> contentList =
+          new CopyOnWriteArrayList<>(requestedcontentList);
+      request.getRequest().put(JsonKey.CONTENTS, contentList);
+      // map to hold the status of requested state of contents
+      Map<String, Integer> contentStatusHolder = new HashMap<>();
+
+      if (!(contentList.isEmpty())) {
+        for (Map<String, Object> map : contentList) {
+          // replace the course id (equivalent to Ekstep content id) with One way hashing
+          // of
+          // userId#courseId , bcoz in cassndra we are saving course id as userId#courseId
+
+          String batchId = (String) map.get(JsonKey.BATCH_ID);
+          boolean flag = true;
+
+          // code to validate the whether request for valid batch range(start and end
+          // date)
+          if (!(StringUtils.isBlank(batchId))) {
+            Response batchResponse =
+                cassandraOperation.getRecordById(
+                    batchdbInfo.getKeySpace(), batchdbInfo.getTableName(), batchId);
+            List<Map<String, Object>> batches =
+                (List<Map<String, Object>>) batchResponse.getResult().get(JsonKey.RESPONSE);
+            if (batches.isEmpty()) {
+              flag = false;
             } else {
-              updateMessages(
-                  respMessages, ContentUpdateResponseKeys.NOT_A_ON_GOING_BATCH.name(), batchId);
+              Map<String, Object> batchInfo = batches.get(0);
+              flag = validateBatchRange(batchInfo);
             }
-          } else {
-            updateMessages(
-                respMessages, ContentUpdateResponseKeys.BATCH_NOT_EXISTS.name(), batchId);
+
+            if (!flag) {
+              response
+                  .getResult()
+                  .put((String) map.get(JsonKey.CONTENT_ID), "BATCH NOT STARTED OR BATCH CLOSED");
+              contentList.remove(map);
+              continue;
+            }
+          }
+          map.putIfAbsent(JsonKey.COURSE_ID, JsonKey.NOT_AVAILABLE);
+          preOperation(map, userId, contentStatusHolder);
+          map.put(JsonKey.USER_ID, userId);
+          map.put(JsonKey.DATE_TIME, new Timestamp(new Date().getTime()));
+
+          try {
+            cassandraOperation.upsertRecord(dbInfo.getKeySpace(), dbInfo.getTableName(), map);
+            response.getResult().put((String) map.get(JsonKey.CONTENT_ID), JsonKey.SUCCESS);
+            // create telemetry for user for each content ...
+            targetObject =
+                TelemetryUtil.generateTargetObject(
+                    (String) map.get(JsonKey.BATCH_ID), JsonKey.BATCH, JsonKey.CREATE, null);
+            // since this event will generate multiple times so nedd to recreate correlated
+            // objects every time ...
+            correlatedObject = new ArrayList<>();
+            TelemetryUtil.generateCorrelatedObject(
+                (String) map.get(JsonKey.CONTENT_ID), JsonKey.CONTENT, null, correlatedObject);
+            TelemetryUtil.generateCorrelatedObject(
+                (String) map.get(JsonKey.COURSE_ID), JsonKey.COURSE, null, correlatedObject);
+            TelemetryUtil.generateCorrelatedObject(
+                (String) map.get(JsonKey.BATCH_ID), JsonKey.BATCH, null, correlatedObject);
+            TelemetryUtil.telemetryProcessingCall(
+                request.getRequest(), targetObject, correlatedObject);
+
+            Map<String, String> rollUp = new HashMap<>();
+            rollUp.put("l1", (String) map.get(JsonKey.COURSE_ID));
+            rollUp.put("l2", (String) map.get(JsonKey.CONTENT_ID));
+            TelemetryUtil.addTargetObjectRollUp(rollUp, targetObject);
+
+          } catch (Exception ex) {
+            response.getResult().put((String) map.get(JsonKey.CONTENT_ID), JsonKey.FAILED);
+            contentList.remove(map);
           }
         }
-        Response response = new Response();
-        response.getResult().putAll(respMessages);
-        sender().tell(response, self());
-      } else {
-        throw new ProjectCommonException(
-            ResponseCode.emptyContentsForUpdateBatchStatus.getErrorCode(),
-            ResponseCode.emptyContentsForUpdateBatchStatus.getErrorMessage(),
-            ResponseCode.CLIENT_ERROR.getResponseCode());
       }
+      sender().tell(response, self());
+      // call to update the corresponding course
+      ProjectLogger.log("Calling background job to update learner state");
+      request.getRequest().put(CONTENT_STATE_INFO, contentStatusHolder);
+      request.setOperation(ActorOperations.UPDATE_LEARNER_STATE.getValue());
+      tellToAnother(request);
     } else {
       onReceiveUnsupportedOperation(request.getOperation());
     }
   }
 
-  private List<Map<String, Object>> getBatches(List<String> batchIds) {
-    Map<String, Object> filters =
-        new HashMap<String, Object>() {
-          {
-            put("batchId", batchIds);
-          }
-        };
-    SearchDTO dto = new SearchDTO();
-    dto.getAdditionalProperties().put(JsonKey.FILTERS, filters);
-    Future<Map<String, Object>> searchFuture =
-        esService.search(dto, ProjectUtil.EsType.courseBatch.getTypeName());
-    Map<String, Object> response =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(searchFuture);
-    return (List<Map<String, Object>>) response.get(JsonKey.CONTENT);
+  private boolean validateBatchRange(Map<String, Object> batchInfo) {
+
+    String start = (String) batchInfo.get(JsonKey.START_DATE);
+    String end = (String) batchInfo.get(JsonKey.END_DATE);
+
+    SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
+    Date todaydate = null;
+    Date startDate = null;
+    Date endDate = null;
+
+    try {
+      todaydate = format.parse((String) format.format(new Date()));
+      startDate = format.parse(start);
+      endDate = null;
+      if (!(StringUtils.isBlank(end))) {
+        endDate = format.parse(end);
+      }
+    } catch (ParseException e) {
+      ProjectLogger.log("Date parse exception while parsing batch start and end date", e);
+      return false;
+    }
+
+    if (todaydate.compareTo(startDate) < 0) {
+      return false;
+    }
+
+    return (!(null != endDate && todaydate.compareTo(endDate) > 0));
   }
 
-  private List<Map<String, Object>> getContents(
-      String userId, List<String> contentIds, String batchId) {
-    Map<String, Object> filters =
-        new HashMap<String, Object>() {
-          {
-            put("userid", userId);
-            put("contentid", contentIds);
-            put("batchid", batchId);
-          }
-        };
+  /**
+   * Method te perform the per operation on contents like setting the status , last completed and
+   * access time etc.
+   */
+  @SuppressWarnings("unchecked")
+  private void preOperation(
+      Map<String, Object> req, String userId, Map<String, Integer> contentStateHolder)
+      throws ParseException {
+
+    SimpleDateFormat simpleDateFormat = ProjectUtil.getDateFormatter();
+    simpleDateFormat.setLenient(false);
+
+    Util.DbInfo dbInfo = Util.dbInfoMap.get(JsonKey.LEARNER_CONTENT_DB);
+    req.put(JsonKey.ID, generatePrimaryKey(req, userId));
+    contentStateHolder.put(
+        (String) req.get(JsonKey.ID), ((BigInteger) req.get(JsonKey.STATUS)).intValue());
     Response response =
-        cassandraOperation.getRecords(
-            consumptionDBInfo.getKeySpace(), consumptionDBInfo.getTableName(), filters, null);
+        cassandraOperation.getRecordById(
+            dbInfo.getKeySpace(), dbInfo.getTableName(), (String) req.get(JsonKey.ID));
+
     List<Map<String, Object>> resultList =
         (List<Map<String, Object>>) response.getResult().get(JsonKey.RESPONSE);
-    if (CollectionUtils.isEmpty(resultList)) {
-      resultList = new ArrayList<>();
-    }
-    return resultList;
-  }
 
-  private Map<String, Object> processContent(
-      Map<String, Object> inputContent, Map<String, Object> existingContent, String userId) {
-    int inputStatus = getInteger(inputContent.get("status"), 0);
-    Date inputCompletedDate =
-        parseDate(inputContent.get(JsonKey.LAST_COMPLETED_TIME), simpleDateFormat);
-    Date inputAccessTime = parseDate(inputContent.get(JsonKey.LAST_ACCESS_TIME), simpleDateFormat);
-    if (MapUtils.isNotEmpty(existingContent)) {
-      int viewCount = getInteger(existingContent.get(JsonKey.VIEW_COUNT), 0);
-      inputContent.put(JsonKey.VIEW_COUNT, viewCount + 1);
+    if (!(resultList.isEmpty())) {
+      Map<String, Object> result = resultList.get(0);
+      int currentStatus = (int) result.get(JsonKey.STATUS);
+      int requestedStatus = ((BigInteger) req.get(JsonKey.STATUS)).intValue();
 
-      Date accessTime = parseDate(existingContent.get(JsonKey.LAST_ACCESS_TIME), simpleDateFormat);
-      inputContent.put(JsonKey.LAST_ACCESS_TIME, compareTime(accessTime, inputAccessTime));
-
-      int existingStatus = getInteger(existingContent.get(JsonKey.PROGRESS), 0);
-      int inputProgress = getInteger(inputContent.get(JsonKey.PROGRESS), 0);
-      int existingProgress = getInteger(existingContent.get(JsonKey.PROGRESS), 0);
-      int progress = Collections.max(Arrays.asList(inputProgress, existingProgress));
-      inputContent.put(JsonKey.PROGRESS, progress);
-      Date completedDate =
-          parseDate(existingContent.get(JsonKey.LAST_COMPLETED_TIME), simpleDateFormat);
-
-      int completedCount = getInteger(existingContent.get(JsonKey.COMPLETED_COUNT), 0);
-      if (inputStatus >= existingStatus) {
-        if (inputStatus == 2) {
-          completedCount = completedCount + 1;
-          inputContent.put(JsonKey.PROGRESS, 100);
-          inputContent.put(
-              JsonKey.LAST_COMPLETED_TIME, compareTime(completedDate, inputCompletedDate));
+      Integer currentProgressStatus = 0;
+      if (isNotNull(result.get(JsonKey.CONTENT_PROGRESS))) {
+        currentProgressStatus = (Integer) result.get(JsonKey.CONTENT_PROGRESS);
+      }
+      if (isNotNull(req.get(JsonKey.CONTENT_PROGRESS))) {
+        Integer requestedProgressStatus =
+            ((BigInteger) req.get(JsonKey.CONTENT_PROGRESS)).intValue();
+        if (requestedProgressStatus > currentProgressStatus) {
+          req.put(JsonKey.CONTENT_PROGRESS, requestedProgressStatus);
+        } else {
+          req.put(JsonKey.CONTENT_PROGRESS, currentProgressStatus);
         }
-        inputContent.put(JsonKey.COMPLETED_COUNT, completedCount);
+      } else {
+        req.put(JsonKey.CONTENT_PROGRESS, currentProgressStatus);
       }
-      if (completedCount >= 1) {
-        inputContent.put(JsonKey.STATUS, 2);
+
+      Date accessTime = parseDate(result.get(JsonKey.LAST_ACCESS_TIME), simpleDateFormat);
+      Date requestAccessTime = parseDate(req.get(JsonKey.LAST_ACCESS_TIME), simpleDateFormat);
+
+      Date completedDate = parseDate(result.get(JsonKey.LAST_COMPLETED_TIME), simpleDateFormat);
+      Date requestCompletedTime = parseDate(req.get(JsonKey.LAST_COMPLETED_TIME), simpleDateFormat);
+
+      int completedCount;
+      if (!(isNullCheck(result.get(JsonKey.COMPLETED_COUNT)))) {
+        completedCount = (int) result.get(JsonKey.COMPLETED_COUNT);
+      } else {
+        completedCount = 0;
       }
+      int viewCount;
+      if (!(isNullCheck(result.get(JsonKey.VIEW_COUNT)))) {
+        viewCount = (int) result.get(JsonKey.VIEW_COUNT);
+      } else {
+        viewCount = 0;
+      }
+
+      if (requestedStatus >= currentStatus) {
+        req.put(JsonKey.STATUS, requestedStatus);
+        if (requestedStatus == 2) {
+          req.put(JsonKey.COMPLETED_COUNT, completedCount + 1);
+          req.put(JsonKey.LAST_COMPLETED_TIME, compareTime(completedDate, requestCompletedTime));
+        } else {
+          req.put(JsonKey.COMPLETED_COUNT, completedCount);
+        }
+        req.put(JsonKey.VIEW_COUNT, viewCount + 1);
+        req.put(JsonKey.LAST_ACCESS_TIME, compareTime(accessTime, requestAccessTime));
+        req.put(JsonKey.LAST_UPDATED_TIME, ProjectUtil.getFormattedDate());
+
+      } else {
+        req.put(JsonKey.STATUS, currentStatus);
+        req.put(JsonKey.VIEW_COUNT, viewCount + 1);
+        req.put(JsonKey.LAST_ACCESS_TIME, compareTime(accessTime, requestAccessTime));
+        req.put(JsonKey.LAST_UPDATED_TIME, ProjectUtil.getFormattedDate());
+        req.put(JsonKey.COMPLETED_COUNT, completedCount);
+      }
+
     } else {
-      if (inputStatus == 2) {
-        inputContent.put(JsonKey.COMPLETED_COUNT, 1);
-        inputContent.put(JsonKey.PROGRESS, 100);
-        inputContent.put(JsonKey.LAST_COMPLETED_TIME, compareTime(null, inputCompletedDate));
+      // IT IS NEW CONTENT SIMPLY ADD IT
+      Date requestCompletedTime = parseDate(req.get(JsonKey.LAST_COMPLETED_TIME), simpleDateFormat);
+      if (null != req.get(JsonKey.STATUS)) {
+        int requestedStatus = ((BigInteger) req.get(JsonKey.STATUS)).intValue();
+        req.put(JsonKey.STATUS, requestedStatus);
+        if (requestedStatus == 2) {
+          req.put(JsonKey.COMPLETED_COUNT, 1);
+          req.put(JsonKey.LAST_COMPLETED_TIME, compareTime(null, requestCompletedTime));
+          req.put(JsonKey.COMPLETED_COUNT, 1);
+        } else {
+          req.put(JsonKey.COMPLETED_COUNT, 0);
+        }
+
+      } else {
+        req.put(JsonKey.STATUS, ProjectUtil.ProgressStatus.NOT_STARTED.getValue());
+        req.put(JsonKey.COMPLETED_COUNT, 0);
       }
-      inputContent.put(JsonKey.VIEW_COUNT, 1);
-      inputContent.put(JsonKey.LAST_ACCESS_TIME, compareTime(null, inputAccessTime));
-    }
-    inputContent.put(JsonKey.LAST_UPDATED_TIME, ProjectUtil.getFormattedDate());
-    inputContent.put("status", inputStatus);
-    inputContent.put("userId", userId);
-    return inputContent;
-  }
 
-  private Map<String, Object> getBatchCurrentStatus(
-      String batchId, String userId, List<Map<String, Object>> contents) {
-    Map<String, Object> lastAccessedContent =
-        contents
-            .stream()
-            .max(
-                Comparator.comparing(
-                    x -> {
-                      return parseDate(x.get(JsonKey.LAST_ACCESS_TIME), simpleDateFormat);
-                    }))
-            .get();
-    Map<String, Object> courseBatch =
-        new HashMap<String, Object>() {
-          {
-            put("batchId", batchId);
-            put("userId", userId);
-            put("lastreadcontentid", lastAccessedContent.get("contentId"));
-            put("lastreadcontentstatus", lastAccessedContent.get("status"));
-          }
-        };
-    return courseBatch;
-  }
+      int progressStatus = 0;
+      if (isNotNull(req.get(JsonKey.CONTENT_PROGRESS))) {
+        progressStatus = ((BigInteger) req.get(JsonKey.CONTENT_PROGRESS)).intValue();
+      }
+      req.put(JsonKey.CONTENT_PROGRESS, progressStatus);
 
-  private void updateMessages(Map<String, List<Object>> messages, String key, Object value) {
-    if (!messages.containsKey(key)) {
-      messages.put(key, new ArrayList<Object>());
-    }
-    if (value instanceof List) {
-      List list = (List) value;
-      messages.get(key).addAll(list);
-    } else {
-      messages.get(key).add(value);
+      req.put(JsonKey.VIEW_COUNT, 1);
+      Date requestAccessTime = parseDate(req.get(JsonKey.LAST_ACCESS_TIME), simpleDateFormat);
+
+      req.put(JsonKey.LAST_UPDATED_TIME, ProjectUtil.getFormattedDate());
+
+      if (requestAccessTime != null) {
+        req.put(JsonKey.LAST_ACCESS_TIME, (String) req.get(JsonKey.LAST_ACCESS_TIME));
+      } else {
+        req.put(JsonKey.LAST_ACCESS_TIME, ProjectUtil.getFormattedDate());
+      }
     }
   }
 
-  private int getInteger(Object obj, int defaultValue) {
-    int value = defaultValue;
-    Number number = (Number) obj;
-    if (null != number) {
-      value = number.intValue();
-    }
-    return value;
-  }
-
-  private Date parseDate(Object obj, SimpleDateFormat formatter) {
+  private Date parseDate(Object obj, SimpleDateFormat formatter) throws ParseException {
     if (null == obj || ((String) obj).equalsIgnoreCase(JsonKey.NULL)) {
       return null;
     }
@@ -336,67 +350,7 @@ public class LearnerStateUpdateActor extends BaseActor {
     return OneWayHashing.encryptVal(key);
   }
 
-  /**
-   * Construct the instruction event data and push the event data as BEInstructionEvent.
-   *
-   * @param userId
-   * @param batchId
-   * @param courseId
-   * @param contents
-   * @throws Exception
-   */
-  private void pushInstructionEvent(
-      String userId, String batchId, String courseId, List<Map<String, Object>> contents)
-      throws Exception {
-    Map<String, Object> data = new HashMap<>();
-
-    data.put(
-        "actor",
-        new HashMap<String, Object>() {
-          {
-            put("id", actorId);
-            put("type", actorType);
-          }
-        });
-
-    data.put(
-        "object",
-        new HashMap<String, Object>() {
-          {
-            put("id", batchId + "_" + userId);
-            put("type", "CourseBatchEnrolment");
-          }
-        });
-
-    data.put("action", "batch-enrolment-update");
-
-    List<Map<String, Object>> contentsMap =
-        contents
-            .stream()
-            .map(
-                c -> {
-                  return new HashMap<String, Object>() {
-                    {
-                      put("contentId", c.get("contentId"));
-                      put("status", c.get("status"));
-                    }
-                  };
-                })
-            .collect(Collectors.toList());
-
-    data.put(
-        "edata",
-        new HashMap<String, Object>() {
-          {
-            put("userId", userId);
-            put("batchId", batchId);
-            put("courseId", courseId);
-            put("contents", contentsMap);
-            put("action", "batch-enrolment-update");
-            put("iteration", 1);
-          }
-        });
-
-    InstructionEventGenerator.pushInstructionEvent(data);
+  private boolean isNullCheck(Object obj) {
+    return null == obj;
   }
 }

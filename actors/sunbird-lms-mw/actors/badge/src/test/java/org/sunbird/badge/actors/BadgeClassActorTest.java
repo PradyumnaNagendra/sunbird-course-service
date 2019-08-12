@@ -10,7 +10,6 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.Mockito;
 import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PowerMockIgnore;
 import org.powermock.modules.junit4.PowerMockRunner;
@@ -81,7 +80,7 @@ public class BadgeClassActorTest {
 
   @Test
   public void testGetBadgeClassSuccess() {
-    PowerMockito.when(mockBadgingService.getBadgeClassDetails(Mockito.anyString()))
+    PowerMockito.when(mockBadgingService.getBadgeClassDetails(actorMessage))
         .thenReturn(new Response());
 
     actorMessage.setOperation(BadgingActorOperations.GET_BADGE_CLASS.getValue());
@@ -94,7 +93,7 @@ public class BadgeClassActorTest {
 
   @Test
   public void testGetBadgeClassFailure() {
-    PowerMockito.when(mockBadgingService.getBadgeClassDetails(Mockito.anyString()))
+    PowerMockito.when(mockBadgingService.getBadgeClassDetails(actorMessage))
         .thenThrow(resourceNotFoundException);
 
     actorMessage.setOperation(BadgingActorOperations.GET_BADGE_CLASS.getValue());

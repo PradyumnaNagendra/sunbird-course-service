@@ -1,29 +1,23 @@
+/** */
 package org.sunbird.learner.util;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.commons.collections.MapUtils;
 import org.sunbird.cassandra.CassandraOperation;
-import org.sunbird.common.ElasticSearchHelper;
-import org.sunbird.common.ElasticSearchTcpImpl;
-import org.sunbird.common.inf.ElasticSearchService;
+import org.sunbird.common.ElasticSearchUtil;
 import org.sunbird.common.models.util.HttpUtil;
 import org.sunbird.common.models.util.JsonKey;
 import org.sunbird.common.models.util.LoggerEnum;
 import org.sunbird.common.models.util.ProjectLogger;
 import org.sunbird.common.models.util.ProjectUtil;
 import org.sunbird.common.models.util.PropertiesCache;
-import org.sunbird.common.request.HeaderParam;
 import org.sunbird.dto.SearchDTO;
 import org.sunbird.helper.ServiceFactory;
 import org.sunbird.learner.actors.coursebatch.CourseEnrollmentActor;
-import scala.concurrent.Future;
 
 /**
  * This class will update course batch count to EKStep. First it will get batch details from ES ,
@@ -34,7 +28,6 @@ import scala.concurrent.Future;
  */
 public final class CourseBatchSchedulerUtil {
   public static Map<String, String> headerMap = new HashMap<>();
-  private static ElasticSearchService esService = new ElasticSearchTcpImpl();
 
   static {
     String header = ProjectUtil.getConfigValue(JsonKey.EKSTEP_AUTHORIZATION);
@@ -52,10 +45,7 @@ public final class CourseBatchSchedulerUtil {
    */
   public static Map<String, Object> getBatchDetailsFromES(String startDate, String endDate) {
     ProjectLogger.log(
-        "CourseBatchSchedulerUtil:getBatchDetailsFromES: method call start to collect get course batch data -"
-            + startDate
-            + " "
-            + endDate,
+        "method call start to collect get course batch data -" + startDate + " " + endDate,
         LoggerEnum.INFO.name());
     Map<String, Object> response = new HashMap<>();
     List<Map<String, Object>> courseBatchStartedList = getToBeUpdatedCoursesByDate(startDate, true);
@@ -72,10 +62,7 @@ public final class CourseBatchSchedulerUtil {
       response.put(JsonKey.STATUS, courseBatchStartStatusList);
     }
     ProjectLogger.log(
-        "CourseBatchSchedulerUtil:getBatchDetailsFromES: method call end to collect get course batch data -"
-            + startDate
-            + " "
-            + endDate,
+        "method call end to collect get course batch data -" + startDate + " " + endDate,
         LoggerEnum.INFO.name());
     return response;
   }
@@ -86,9 +73,7 @@ public final class CourseBatchSchedulerUtil {
    * @param map
    */
   public static void updateCourseBatchDbStatus(Map<String, Object> map, Boolean increment) {
-    ProjectLogger.log(
-        "CourseBatchSchedulerUtil:updateCourseBatchDbStatus: updating course batch details start",
-        LoggerEnum.INFO.name());
+    ProjectLogger.log("updating course batch details start", LoggerEnum.INFO.name());
     try {
       boolean response =
           doOperationInEkStepCourse(
@@ -102,31 +87,25 @@ public final class CourseBatchSchedulerUtil {
           updateDataIntoCassandra(map);
         }
       } else {
-        ProjectLogger.log(
-            "CourseBatchSchedulerUtil:updateCourseBatchDbStatus: Ekstep content update failed for courseId "
-                + (String) map.get(JsonKey.COURSE_ID),
-            LoggerEnum.INFO.name());
+        ProjectLogger.log("Ekstep content updatation failed.", LoggerEnum.INFO.name());
       }
     } catch (Exception e) {
-      ProjectLogger.log(
-          "CourseBatchSchedulerUtil:updateCourseBatchDbStatus: Exception occurred while savin data to course batch db "
-              + e.getMessage(),
-          LoggerEnum.INFO.name());
+      ProjectLogger.log("Exception occurred while savin data to course batch db ", e);
     }
   }
 
   /** @param map */
   public static boolean updateDataIntoES(Map<String, Object> map) {
-    boolean flag = true;
+    Boolean flag = true;
     try {
-      Future<Boolean> flagF =
-          esService.update(
-              ProjectUtil.EsType.course.getTypeName(), (String) map.get(JsonKey.ID), map);
-      flag = (boolean) ElasticSearchHelper.getResponseFromFuture(flagF);
+      flag =
+          ElasticSearchUtil.updateData(
+              ProjectUtil.EsIndex.sunbird.getIndexName(),
+              ProjectUtil.EsType.course.getTypeName(),
+              (String) map.get(JsonKey.ID),
+              map);
     } catch (Exception e) {
-      ProjectLogger.log(
-          "CourseBatchSchedulerUtil:updateDataIntoES: Exception occurred while saving course batch data to ES",
-          e);
+      ProjectLogger.log("Exception occurred while saving course batch data to ES", e);
       flag = false;
     }
     return flag;
@@ -138,10 +117,6 @@ public final class CourseBatchSchedulerUtil {
     Util.DbInfo courseBatchDBInfo = Util.dbInfoMap.get(JsonKey.COURSE_BATCH_DB);
     cassandraOperation.updateRecord(
         courseBatchDBInfo.getKeySpace(), courseBatchDBInfo.getTableName(), map);
-    ProjectLogger.log(
-        "CourseBatchSchedulerUtil:updateDataIntoCassandra: Update Successful for batchId "
-            + map.get(JsonKey.ID),
-        LoggerEnum.INFO);
   }
 
   private static void addHeaderProps(Map<String, String> header, String key, String value) {
@@ -171,9 +146,7 @@ public final class CourseBatchSchedulerUtil {
                 + courseId,
             LoggerEnum.INFO.name());
         addHeaderProps(
-            getBasicHeader(),
-            HeaderParam.CHANNEL_ID.getName(),
-            (String) ekStepContent.get(JsonKey.CHANNEL));
+            getBasicHeader(), JsonKey.CHANNEL_ID, (String) ekStepContent.get(JsonKey.CHANNEL));
       } else {
         ProjectLogger.log(
             "No channel value available in content with Id " + courseId, LoggerEnum.INFO.name());
@@ -195,22 +168,13 @@ public final class CourseBatchSchedulerUtil {
     String dateAttribute = isStartDate ? JsonKey.START_DATE : JsonKey.END_DATE;
     String counterAttribute =
         isStartDate ? JsonKey.COUNTER_INCREMENT_STATUS : JsonKey.COUNTER_DECREMENT_STATUS;
-    int status =
-        isStartDate
-            ? ProjectUtil.ProgressStatus.NOT_STARTED.getValue()
-            : ProjectUtil.ProgressStatus.STARTED.getValue();
     SearchDTO dto = new SearchDTO();
     Map<String, Object> map = new HashMap<>();
     Map<String, String> dateRangeFilter = new HashMap<>();
     dateRangeFilter.put("<=", date);
     map.put(dateAttribute, dateRangeFilter);
-    map.put(JsonKey.STATUS, status);
     map.put(counterAttribute, false);
     dto.addAdditionalProperty(JsonKey.FILTERS, map);
-    Map<String, Object> sortMap = new HashMap<>();
-    sortMap.put(dateAttribute, JsonKey.DESC);
-    dto.setSortBy(sortMap);
-    dto.setLimit(500);
     return searchContent(dto);
   }
 
@@ -226,68 +190,14 @@ public final class CourseBatchSchedulerUtil {
     return searchContent(dto);
   }
 
-  public static List<Map<String, Object>> getFutureCourseBatches(
-      String courseId, String today, String enrollmentType) {
-    SearchDTO dto = new SearchDTO();
-    Map<String, Object> map = new HashMap<>();
-    Map<String, String> endDateRangeFilter = new HashMap<>();
-    endDateRangeFilter.put(">", today);
-    map.put(JsonKey.END_DATE, endDateRangeFilter);
-    map.put(JsonKey.ENROLLMENT_TYPE, enrollmentType);
-    map.put(JsonKey.COURSE_ID, courseId);
-    dto.addAdditionalProperty(JsonKey.FILTERS, map);
-    return searchContent(dto);
-  }
-
-  public static List<Map<String, Object>> getOngoingAndUpcomingCourseBatches(
-      String courseId, String enrollmentType) {
-    SearchDTO dto = new SearchDTO();
-    Map<String, Object> map = new HashMap<>();
-    map.put(
-        JsonKey.STATUS,
-        new ArrayList<String>(
-            Arrays.asList("0", "1"))); // Set status to upcoming and ongoing batches
-    map.put(JsonKey.ENROLLMENT_TYPE, enrollmentType);
-    map.put(JsonKey.COURSE_ID, courseId);
-    dto.addAdditionalProperty(JsonKey.FILTERS, map);
-    return searchContent(dto);
-  }
-
-  public static Map<String, Object> getOpenForEnrollmentCourses(String countName, int offset) {
-    Map<String, Object> dto = new HashMap<>();
-    Map<String, Integer> countFilter = new HashMap<>();
-    countFilter.put(">", 0);
-    Map<String, Object> map = new HashMap<>();
-    map.put(countName, countFilter);
-    dto.put(JsonKey.FILTERS, map);
-    dto.put(JsonKey.OFFSET, offset);
-    dto.put(JsonKey.LIMIT, 100);
-    Map<String, Object> requestMap = new HashMap<>();
-    requestMap.put(JsonKey.REQUEST, dto);
-    try {
-      Map<String, Object> result =
-          ContentSearchUtil.searchContentSync(
-              null, new ObjectMapper().writeValueAsString(requestMap), getHeader());
-      if (MapUtils.isNotEmpty(result)) {
-        return result;
-      }
-    } catch (JsonProcessingException e) {
-      ProjectLogger.log(
-          "CourseBatchScheduleUtil:getOpenForEnrollmentCourses: Exception occurred with error message = "
-              + e.getMessage(),
-          LoggerEnum.INFO);
-      return null;
-    }
-    return null;
-  }
-
   @SuppressWarnings("unchecked")
   private static List<Map<String, Object>> searchContent(SearchDTO dto) {
     List<Map<String, Object>> listOfMap = new ArrayList<>();
-    Future<Map<String, Object>> responseMapF =
-        esService.search(dto, ProjectUtil.EsType.course.getTypeName());
     Map<String, Object> responseMap =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(responseMapF);
+        ElasticSearchUtil.complexSearch(
+            dto,
+            ProjectUtil.EsIndex.sunbird.getIndexName(),
+            ProjectUtil.EsType.course.getTypeName());
     if (responseMap != null && responseMap.size() > 0) {
       Object val = responseMap.get(JsonKey.CONTENT);
       if (val != null) {
@@ -315,7 +225,7 @@ public final class CourseBatchSchedulerUtil {
     } else {
       contentName = "c_" + name + "_private_batch_count";
     }
-    return contentName.toLowerCase();
+    return contentName;
   }
 
   public static int getUpdatedBatchCount(
@@ -343,14 +253,5 @@ public final class CourseBatchSchedulerUtil {
       ProjectLogger.log("Error while updating content value " + e.getMessage(), e);
     }
     return JsonKey.SUCCESS.equalsIgnoreCase(response);
-  }
-
-  public static Map<String, String> getHeader() {
-    Map<String, String> headerMap = new HashMap<>();
-    String header = ProjectUtil.getConfigValue(JsonKey.SUNBIRD_AUTHORIZATION);
-    header = JsonKey.BEARER + header;
-    headerMap.put(JsonKey.AUTHORIZATION, header);
-    headerMap.put("Content-Type", "application/json");
-    return headerMap;
   }
 }

@@ -1,10 +1,10 @@
 package org.sunbird.learner.actors.coursebatch.service;
 
-import java.util.*;
-import org.sunbird.common.ElasticSearchHelper;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.commons.lang3.StringUtils;
+import org.sunbird.common.ElasticSearchUtil;
 import org.sunbird.common.exception.ProjectCommonException;
-import org.sunbird.common.factory.EsClientFactory;
-import org.sunbird.common.inf.ElasticSearchService;
 import org.sunbird.common.models.util.JsonKey;
 import org.sunbird.common.models.util.LoggerEnum;
 import org.sunbird.common.models.util.ProjectLogger;
@@ -15,21 +15,12 @@ import org.sunbird.dto.SearchDTO;
 import org.sunbird.learner.actors.coursebatch.dao.UserCoursesDao;
 import org.sunbird.learner.actors.coursebatch.dao.impl.UserCoursesDaoImpl;
 import org.sunbird.models.user.courses.UserCourses;
-import scala.concurrent.Future;
 
 public class UserCoursesService {
   private UserCoursesDao userCourseDao = UserCoursesDaoImpl.getInstance();
-  private static ElasticSearchService esService = EsClientFactory.getInstance(JsonKey.REST);
-  public static final String UNDERSCORE = "_";
-
-  protected Integer CASSANDRA_BATCH_SIZE = getBatchSize(JsonKey.CASSANDRA_WRITE_BATCH_SIZE);
-
-  public static String generateUserCourseESId(String batchId, String userId) {
-    return batchId + UNDERSCORE + userId;
-  }
 
   public static void validateUserUnenroll(UserCourses userCourseResult) {
-    if (userCourseResult == null || !userCourseResult.isActive()) {
+    if (userCourseResult == null) {
       ProjectLogger.log(
           "UserCoursesService:validateUserUnenroll: User is not enrolled yet",
           LoggerEnum.INFO.name());
@@ -38,7 +29,16 @@ public class UserCoursesService {
           ResponseCode.userNotEnrolledCourse.getErrorMessage(),
           ResponseCode.CLIENT_ERROR.getResponseCode());
     }
-    if (userCourseResult.getStatus() == ProjectUtil.ProgressStatus.COMPLETED.getValue()) {
+    if (!userCourseResult.isActive()) {
+      ProjectLogger.log(
+          "UserCoursesService:validateUserUnenroll: User does not have an enrolled course");
+      throw new ProjectCommonException(
+          ResponseCode.userNotEnrolledCourse.getErrorCode(),
+          ResponseCode.userNotEnrolledCourse.getErrorMessage(),
+          ResponseCode.CLIENT_ERROR.getResponseCode());
+    }
+    if (userCourseResult.getProgress() > 0
+        && (userCourseResult.getProgress() == userCourseResult.getLeafNodesCount())) {
       ProjectLogger.log(
           "UserCoursesService:validateUserUnenroll: User already completed the course");
       throw new ProjectCommonException(
@@ -64,80 +64,49 @@ public class UserCoursesService {
             + batchId);
   }
 
-  public void enroll(String batchId, String courseId, List<String> userIds) {
-    Integer count = 0;
-
-    List<Map<String, Object>> records = new ArrayList<>();
-    Map<String, Object> userCoursesCommon = new HashMap<>();
-    userCoursesCommon.put(JsonKey.BATCH_ID, batchId);
-    userCoursesCommon.put(JsonKey.COURSE_ID, courseId);
-    userCoursesCommon.put(JsonKey.COURSE_ENROLL_DATE, ProjectUtil.getFormattedDate());
-    userCoursesCommon.put(JsonKey.ACTIVE, ProjectUtil.ActiveStatus.ACTIVE.getValue());
-    userCoursesCommon.put(JsonKey.STATUS, ProjectUtil.ProgressStatus.NOT_STARTED.getValue());
-    userCoursesCommon.put(JsonKey.COURSE_PROGRESS, 0);
-
-    for (String userId : userIds) {
-      Map<String, Object> userCourses = new HashMap<>();
-      userCourses.put(JsonKey.USER_ID, userId);
-      userCourses.putAll(userCoursesCommon);
-
-      count++;
-      records.add(userCourses);
-      if (count > CASSANDRA_BATCH_SIZE) {
-        performBatchInsert(records);
-        syncUsersToES(records);
-        records.clear();
-        count = 0;
-      }
-      if (count != 0) {
-        performBatchInsert(records);
-        syncUsersToES(records);
-        records.clear();
-        count = 0;
-      }
+  public Boolean enroll(
+      String batchId, String courseId, String userId, Map<String, String> additionalCourseInfo) {
+    Boolean flag = false;
+    Map<String, Object> userCourses = new HashMap<>();
+    userCourses.put(JsonKey.USER_ID, userId);
+    userCourses.put(JsonKey.BATCH_ID, batchId);
+    userCourses.put(JsonKey.COURSE_ID, courseId);
+    userCourses.put(JsonKey.ID, getPrimaryKey(userId, courseId, batchId));
+    userCourses.put(JsonKey.CONTENT_ID, courseId);
+    userCourses.put(JsonKey.COURSE_ENROLL_DATE, ProjectUtil.getFormattedDate());
+    userCourses.put(JsonKey.ACTIVE, ProjectUtil.ActiveStatus.ACTIVE.getValue());
+    userCourses.put(JsonKey.STATUS, ProjectUtil.ProgressStatus.NOT_STARTED.getValue());
+    userCourses.put(JsonKey.COURSE_PROGRESS, 0);
+    userCourses.put(JsonKey.COURSE_LOGO_URL, additionalCourseInfo.get(JsonKey.COURSE_LOGO_URL));
+    userCourses.put(JsonKey.COURSE_NAME, additionalCourseInfo.get(JsonKey.COURSE_NAME));
+    userCourses.put(JsonKey.DESCRIPTION, additionalCourseInfo.get(JsonKey.DESCRIPTION));
+    if (!StringUtils.isBlank(additionalCourseInfo.get(JsonKey.LEAF_NODE_COUNT))) {
+      userCourses.put(
+          JsonKey.LEAF_NODE_COUNT,
+          Integer.parseInt("" + additionalCourseInfo.get(JsonKey.LEAF_NODE_COUNT)));
     }
-  }
-
-  private void syncUsersToES(List<Map<String, Object>> records) {
-
-    for (Map<String, Object> userCourses : records) {
-      sync(
-          userCourses,
-          (String) userCourses.get(JsonKey.BATCH_ID),
-          (String) userCourses.get(JsonKey.USER_ID));
-    }
-  }
-
-  protected void performBatchInsert(List<Map<String, Object>> records) {
+    userCourses.put(JsonKey.TOC_URL, additionalCourseInfo.get(JsonKey.TOC_URL));
     try {
-      userCourseDao.batchInsert(records);
+      userCourseDao.insert(userCourses);
+      sync(userCourses, (String) userCourses.get(JsonKey.ID));
+      flag = true;
     } catch (Exception ex) {
       ProjectLogger.log(
-          "UserCoursesService:performBatchInsert: Performing retry due to exception = "
-              + ex.getMessage(),
-          LoggerEnum.ERROR);
-      for (Map<String, Object> task : records) {
-        try {
-          userCourseDao.insert(task);
-        } catch (Exception exception) {
-          ProjectLogger.log(
-              "UserCoursesService:performBatchInsert: Exception occurred with error message = "
-                  + ex.getMessage()
-                  + " for ID = "
-                  + task.get(JsonKey.ID),
-              exception);
-        }
-      }
+          "UserCoursesService:enroll: Exception occurred with error message = " + ex.getMessage(),
+          ex);
+      flag = false;
     }
+    return flag;
   }
 
-  public void unenroll(String batchId, String userId) {
-    UserCourses userCourses = userCourseDao.read(batchId, userId);
+  public void unenroll(String userId, String courseId, String batchId) {
+    UserCourses userCourses = userCourseDao.read(getPrimaryKey(userId, courseId, batchId));
     validateUserUnenroll(userCourses);
     Map<String, Object> updateAttributes = new HashMap<>();
     updateAttributes.put(JsonKey.ACTIVE, ProjectUtil.ActiveStatus.INACTIVE.getValue());
-    userCourseDao.update(userCourses.getBatchId(), userCourses.getUserId(), updateAttributes);
-    sync(updateAttributes, userCourses.getBatchId(), userCourses.getUserId());
+    updateAttributes.put(JsonKey.ID, userCourses.getId());
+    userCourseDao.update(updateAttributes);
+    sync(updateAttributes, userCourses.getId());
   }
 
   public Map<String, Object> getActiveUserCourses(String userId) {
@@ -146,42 +115,21 @@ public class UserCoursesService {
     filter.put(JsonKey.ACTIVE, ProjectUtil.ActiveStatus.ACTIVE.getValue());
     SearchDTO searchDto = new SearchDTO();
     searchDto.getAdditionalProperties().put(JsonKey.FILTERS, filter);
-    Future<Map<String, Object>> resultF =
-        esService.search(searchDto, ProjectUtil.EsType.usercourses.getTypeName());
-    Map<String, Object> result =
-        (Map<String, Object>) ElasticSearchHelper.getResponseFromFuture(resultF);
-    return result;
+    return ElasticSearchUtil.complexSearch(
+        searchDto,
+        ProjectUtil.EsIndex.sunbird.getIndexName(),
+        ProjectUtil.EsType.usercourses.getTypeName());
   }
 
-  public static void sync(Map<String, Object> courseMap, String batchId, String userId) {
-    String id = generateUserCourseESId(batchId, userId);
-    courseMap.put(JsonKey.ID, id);
-    courseMap.put(JsonKey.IDENTIFIER, id);
-    Future<Boolean> responseF =
-        esService.upsert(ProjectUtil.EsType.usercourses.getTypeName(), id, courseMap);
-    boolean response = (boolean) ElasticSearchHelper.getResponseFromFuture(responseF);
+  public static void sync(Map<String, Object> courseMap, String id) {
+    boolean response =
+        ElasticSearchUtil.upsertData(
+            ProjectUtil.EsIndex.sunbird.getIndexName(),
+            ProjectUtil.EsType.usercourses.getTypeName(),
+            id,
+            courseMap);
     ProjectLogger.log(
-        "UserCoursesService:sync: Sync user courses for ID = " + id + " response = " + response,
+        "UserCoursesService:sync: sync user courses id and  response  " + id + "==" + response,
         LoggerEnum.INFO.name());
-  }
-
-  public List<String> getEnrolledUserFromBatch(String batchId) {
-
-    return userCourseDao.getAllActiveUserOfBatch(batchId);
-  }
-
-  public Integer getBatchSize(String key) {
-    Integer batchSize = ProjectUtil.DEFAULT_BATCH_SIZE;
-    try {
-      batchSize = Integer.parseInt(ProjectUtil.getConfigValue(key));
-    } catch (Exception ex) {
-      ProjectLogger.log(
-          "UserCoursesService:getBatchSize: Failed to read cassandra batch size for " + key, ex);
-    }
-    return batchSize;
-  }
-
-  public List<String> getParticipantsList(String batchId, boolean active) {
-    return userCourseDao.getBatchParticipants(batchId, active);
   }
 }
