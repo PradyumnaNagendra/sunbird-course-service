@@ -2,6 +2,10 @@
 package controllers.healthmanager;
 
 import akka.actor.ActorRef;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
 import controllers.BaseController;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -21,6 +25,7 @@ import play.mvc.Result;
 /** @author Manzarul */
 public class HealthController extends BaseController {
   private static List<String> list = new ArrayList<>();
+  private static ObjectMapper mapper = new ObjectMapper();
 
   @Inject
   @Named("health-actor")
@@ -32,6 +37,7 @@ public class HealthController extends BaseController {
     list.add("cassandra");
     list.add("es");
     list.add("ekstep");
+    mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
   }
 
   /**
@@ -58,6 +64,7 @@ public class HealthController extends BaseController {
    *
    * @return CompletionStage<Result>
    */
+
   public CompletionStage<Result> getServiceHealth(Http.Request httpRequest) {
     ProjectLogger.log("Call to get play service health for service.", LoggerEnum.INFO.name());
     Map<String, Object> finalResponseMap = new HashMap<>();
