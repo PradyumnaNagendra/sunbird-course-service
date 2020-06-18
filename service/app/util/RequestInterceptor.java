@@ -40,6 +40,13 @@ public class RequestInterceptor {
     apiHeaderIgnoreMap.put("/private/v1/course/batch/create", var);
     apiHeaderIgnoreMap.put("/v1/course/create", var);
     apiHeaderIgnoreMap.put("/v2/user/courses/list", var);
+    apiHeaderIgnoreMap.put("/v1/course/enroll", var);
+    apiHeaderIgnoreMap.put("/v1/content/state/update", var);
+    apiHeaderIgnoreMap.put("/v1/user/content/state", var);
+    apiHeaderIgnoreMap.put("/v1/content/state/read", var);
+    apiHeaderIgnoreMap.put("/v1/user/courses/list", var);
+    apiHeaderIgnoreMap.put("/v1/course/batch/users/add", var);
+    apiHeaderIgnoreMap.put("/v1/course/batch/create", var);
   }
 
   /**
